@@ -121,12 +121,12 @@ function Gateway(xpub, exchange_key) {
   var self = this
   this.ies = {}
   if (!(self instanceof Gateway)) return new Gateway(xpub, exchange_key)
-    // this.xpub = xpub
+  this.xpub = xpub
   this.unused_addresses = []
   this.addresses_count = 0
   this.events = new EventEmitter()
 
-  // this.retrieved = new HDPublicKey(this.xpub)
+  this.retrieved = new HDPublicKey(this.xpub)
   var bitcoin = new BLT()
 
   this.addUSD = function(payment) {
@@ -257,14 +257,14 @@ function Gateway(xpub, exchange_key) {
   }
 
   var creatingAddresses = {}
-  self.createAddress = function(xpub, id) {
-    console.log('<createAddress>', xpub, id)
+  self.createAddress = function(id) {
+    console.log('<createAddress>', this.xpub, id)
     return new Promise(function(Succ, Reject) {
-      client.get(xpub, function(err, xpubid) {
+      client.get(this.xpub, function(err, xpubid) {
         if (xpubid == null) {
           xpubid = generate_key()
-          client.set(xpub, xpubid, function(err, reply) {
-            console.log('set new key', xpubid, 'for xpub:', xpub)
+          client.set(this.xpub, xpubid, function(err, reply) {
+            console.log('set new key', xpubid, 'for xpub:', this.xpub)
           })
         }
         console.log('got key', xpubid)
@@ -280,12 +280,12 @@ function Gateway(xpub, exchange_key) {
           id_has_address_assigned(id + xpubinfo._id).then(Success, function() {
             debugaddress(colors.green('<Have to get a new one...>'))
             client.lrange('available-addresses' + xpubinfo._id, 0, -1, function(err, addresses) {
-              if (creatingAddresses[xpubinfo._id] != true) {
+              if (creatingAddresses[xpubinfo._id] !== true) {
                 creatingAddresses[xpubinfo._id] = true
                 self.getOneAvailable(id + xpubinfo._id, id, addresses, 0, Success, Reject)
               } else {
                 self.newrandom = 100 + 500 * Math.random()
-                while (self.lastrandom == self.newrandom) {
+                while (self.lastrandom === self.newrandom) {
                   self.newrandom = 100 + 1000 * Math.random()
                 }
                 setTimeout(function() {
@@ -297,7 +297,7 @@ function Gateway(xpub, exchange_key) {
           })
         }
 
-        var xpubinfo = { _id: xpubid, xpub: xpub }
+        var xpubinfo = { _id: xpubid, xpub: this.xpub }
         if (self.ies[xpubinfo._id] == undefined) {
           self.check_gap(xpubinfo, process_create_request)
         } else {
