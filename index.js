@@ -15,7 +15,6 @@ var max_gap = 15
 var debugbrp = require('debug')('brp')
 var debugaddress = require('debug')('brp:address')
 var colors = require('colors')
-var RatesApi = require('openexchangerates-api');
 var randomstring = require('randomstring')
 
 // var env = process.env.NODE_ENV || 'development';
@@ -129,67 +128,6 @@ function Gateway(xpub, exchange_key) {
 
   // this.retrieved = new HDPublicKey(this.xpub)
   var bitcoin = new BLT()
-
-  self.update_rates = function() {
-
-    console.log('<update_rates>')
-    self.exchange.latest(function handleCurrencies(err, data) {
-      console.log('got latest rates...')
-      self.fx.base = "USD";
-      self.fx.rates = data.rates
-      self.fx.currencies = Object.keys(data.rates)
-      self.getCurrencies = function() {
-        return self.fx.currencies
-      }
-      self.validCur = function(Cur) {
-        if (Object.keys(self.fx.rates).indexOf(Cur.toUpperCase()) > -1) {
-          return true
-        } else {
-          return false
-        }
-      }
-      self.USDtoBIT = function(amount) {
-        return self.fx.convert(amount, { from: 'USD', to: 'BTC' }) * 1000000;
-      }
-      self.BITtoUSD = function(amount) {
-        return self.fx.convert(amount / 1000000, { from: 'BTC', to: 'USD' });
-      }
-      self.uBTCtoUSD = self.BITtoUSD
-      self.SATtoUSD = function(amount) {
-        return self.fx.convert(amount / 100000000, { from: 'BTC', to: 'USD' });
-      }
-      self.mBTCtoUSD = function(amount) {
-        return self.fx.convert(amount / 100000000, { from: 'BTC', to: 'USD' });
-      }
-      self.uBTCtoSAT = function(amount) {
-        return amount * 100
-      }
-      self.SATtouBTC = function(amount) {
-        return amount / 100
-      }
-      self.convert = function(from, to, amount) {
-        return self.fx.convert(amount, { from: from, to: to });
-      }
-      self.BITto = function(to, amount) {
-        return self.fx.convert(amount / 100000000, { from: 'BTC', to: to });
-      }
-      self.USDto = function(to, amount) {
-        return self.fx.convert(amount, { from: 'USD', to: to });
-      }
-      self.events.emit('exchange-initialized')
-    })
-  }
-
-  if (exchange_key != undefined) {
-    self.fx = require('money')
-    self.exchange = new RatesApi({
-      appId: exchange_key
-    });
-    self.update_rates()
-    setInterval(self.update_rates, 1000 * 60 * 30)
-  } else {
-    self.events.emit('exchange-initialized')
-  }
 
   this.addUSD = function(payment) {
     debugbrp(colors.red.underline('payment-before'), payment)
