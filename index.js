@@ -1,4 +1,3 @@
-var util = require('util')
 var EventEmitter = require('events').EventEmitter;
 var BLT = require("bitcoin-live-transactions")
 var bitcore = require('bitcore-lib');
@@ -14,7 +13,6 @@ var client = redis.createClient();
 var max_gap = 15
 var debugbrp = require('debug')('brp')
 var debugaddress = require('debug')('brp:address')
-var colors = require('colors')
 var randomstring = require('randomstring')
 
 // var env = process.env.NODE_ENV || 'development';
@@ -25,7 +23,6 @@ var randomstring = require('randomstring')
 module.exports = Gateway
 
 var set_address_in_use = function(address, id, rawid) {
-  debugaddress(colors.yellow('<set_address_in_use>', address, id))
   return new Promise(function(Success, R) {
     client.set('address-' + address, id, function(err, reply) {
       //   debugaddress(err, reply)
@@ -47,10 +44,8 @@ var set_address_in_use = function(address, id, rawid) {
   })
 }
 var seconds_left_for_address = function(address) {
-  debugaddress(colors.yellow('<seconds_left_for_address>', address))
   return new Promise(function(Success, Reject) {
     client.get('address-expiration-' + address, function(err, reply) {
-      debugaddress(colors.cyan('<seconds_left_for_address>:reply', reply))
 
       if (reply != undefined) {
         Success(reply)
@@ -62,15 +57,11 @@ var seconds_left_for_address = function(address) {
 }
 
 var id_has_address_assigned = function(id) {
-  debugaddress(colors.yellow('<id_has_address_assigned>', id))
   return new Promise(function(Success, Reject) {
     client.get('id-' + id, function(err, reply) {
-      debugaddress(colors.cyan('<id_has_address_assigned>', id, ':reply', reply))
       if (reply === null) {
-        debugaddress(colors.red('Rejecting!'))
         Reject();
       } else {
-        debugaddress(colors.green('success!', reply))
         Success(reply)
       }
     });
@@ -78,15 +69,11 @@ var id_has_address_assigned = function(id) {
 }
 
 var id_assigned_to_address = function(address) {
-  debugaddress(colors.yellow('<id_assigned_to_address>', address))
   return new Promise(function(Success, Reject) {
     client.get('rawid-address-' + address, function(err, reply) {
-      debugaddress(colors.cyan('<id_assigned_to_address>:reply', reply))
       if (reply === null) {
-        debugaddress('Rejecting!')
         Reject();
       } else {
-        debugaddress('success!', reply)
         Success(reply)
       }
     });
@@ -94,10 +81,8 @@ var id_assigned_to_address = function(address) {
 }
 
 var is_address_available = function(address, id, rawid) {
-  debugaddress(colors.yellow('<is_address_available>', address))
   return new Promise(function(Success, Reject) {
     client.get('address-' + address, function(err, reply) {
-      debugaddress(colors.cyan('<is_address_available>', address, reply))
       if (reply == undefined) {
         set_address_in_use(address, id, rawid).then(function() {
           Success(address)
@@ -130,23 +115,18 @@ function Gateway(xpub, exchange_key) {
   var bitcoin = new BLT()
 
   this.addUSD = function(payment) {
-    debugbrp(colors.red.underline('payment-before'), payment)
     payment.amount_usd = self.SATtoUSD(payment.amount)
-    debugbrp(colors.green.underline('payment-after'), payment)
     return payment
   }
 
   this.received_payment = function(payment, xpubinfo, initializedCallback) {
-    debugbrp(colors.green('<received_payment>'), payment)
-      // self.forgetAddress(payment.address, xpubinfo, initializedCallback)
+    // self.forgetAddress(payment.address, xpubinfo, initializedCallback)
     id_assigned_to_address(payment.address).then(function(id) {
       payment.id = id
-      debugaddress('<got_id_for_that_address>', payment)
       self.events.emit('payment', payment)
       self.events.emit(payment.address, payment)
       self.forgetAddress(payment.address, xpubinfo, initializedCallback)
     }, function() {
-      debugaddress('<no_id_for_that_address>', payment)
       self.events.emit('payment', payment)
       self.events.emit(payment.address, payment)
       self.forgetAddress(payment.address, xpubinfo, initializedCallback)
@@ -158,9 +138,7 @@ function Gateway(xpub, exchange_key) {
     client.lrem('available-addresses' + xpubinfo._id, 0, address.toString());
     client.sadd('used-addresses' + xpubinfo._id, address.toString());
     client.get('address-' + address, function(err, reply) {
-      debugaddress(colors.cyan('forgetAddress REDIS: address-' + address + ' reply:', reply))
       if (reply != null) {
-        debugaddress(colors.red('REDIS: deleting id-' + reply))
         client.del('id-' + reply)
       }
     });
@@ -181,14 +159,11 @@ function Gateway(xpub, exchange_key) {
 
     client.sismember('used-addresses' + xpubinfo._id, address.toString(), function(err, res) {
       if (res != 0) {
-        debugaddress(colors.black.bgRed('redis used address', address.toString()))
 
         self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
       } else {
         bitcoin.getBalance(address.toString()).then(function(transaction) {
-          //   debugaddress(colors.green('transaction for address', address), transaction)
           if (transaction.txs > 0) {
-            debugaddress(colors.black.bgRed('blockchain used address', address.toString()), 'transaction', transaction)
             client.get('address-' + address.toString(), function(err, reply) {
               if (reply != null) {
                 self.received_payment({ address: address.toString(), amount: self.uBTCtoSAT(transaction.in) }, xpubinfo, initializedCallback)
@@ -209,7 +184,7 @@ function Gateway(xpub, exchange_key) {
             if (address_count[xpubinfo._id] > 4 && initialized[xpubinfo._id] != true) {
               initialized[xpubinfo._id] = true
               initializedCallback()
-                // self.events.emit('initialized')
+              // self.events.emit('initialized')
             }
           }
         })
@@ -278,7 +253,6 @@ function Gateway(xpub, exchange_key) {
 
         var process_create_request = function() {
           id_has_address_assigned(id + xpubinfo._id).then(Success, function() {
-            debugaddress(colors.green('<Have to get a new one...>'))
             client.lrange('available-addresses' + xpubinfo._id, 0, -1, function(err, addresses) {
               if (creatingAddresses[xpubinfo._id] !== true) {
                 creatingAddresses[xpubinfo._id] = true
@@ -297,15 +271,12 @@ function Gateway(xpub, exchange_key) {
           })
         }
 
-        var xpubinfo = { _id: xpubid, xpub: this.xpub }
+        var xpubinfo = { _id: xpubid, xpub: self.xpub }
         if (self.ies[xpubinfo._id] == undefined) {
           self.check_gap(xpubinfo, process_create_request)
         } else {
           process_create_request()
         }
-        debugaddress(colors.magenta('<createAddress>', id))
-
-
       })
     })
   }
