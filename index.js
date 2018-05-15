@@ -114,9 +114,12 @@ function Gateway(xpub, exchange_key) {
   this.retrieved = new HDPublicKey(this.xpub)
   var bitcoin = new BLT()
 
-  this.addUSD = function(payment) {
-    payment.amount_usd = self.SATtoUSD(payment.amount)
-    return payment
+  this.uBTCtoSAT = function(amount) {
+    return amount * 100
+  }
+
+  this.SATtouBTC = function(amount) {
+    return amount / 100
   }
 
   this.received_payment = function(payment, xpubinfo, initializedCallback) {
