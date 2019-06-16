@@ -1,16 +1,16 @@
-var EventEmitter = require('events').EventEmitter;
-var BLT = require("bitcoin-live-transactions")
-var bitcore = require('bitcore-lib');
-var HDPublicKey = bitcore.HDPublicKey;
-var Address = bitcore.Address;
-var Networks = bitcore.Networks;
-var seconds_in_cache_15 = 60 * 15
-var seconds_in_cache_14 = 60 * 14
-var seconds_in_cache_10 = 60 * 10
-var seconds_in_cache_5 = 60 * 5
-var redis = require('redis');
-var client = redis.createClient();
-var max_gap = 15
+var EventEmitter = require('events').EventEmitter
+var BLT = require('../bitcoin-live-transactions')
+var bitcore = require('bitcore-lib')
+var HDPublicKey = bitcore.HDPublicKey
+var Address = bitcore.Address
+var Networks = bitcore.Networks
+var secondsInCache15 = 60 * 15
+var secondsInCache14 = 60 * 14
+var secondsInCache10 = 60 * 10
+var secondsInCache5 = 60 * 5
+var redis = require('redis')
+var client = redis.createClient()
+var maxGap = 15
 var debugbrp = require('debug')('brp')
 var debugaddress = require('debug')('brp:address')
 var randomstring = require('randomstring')
@@ -22,275 +22,267 @@ var randomstring = require('randomstring')
 
 module.exports = Gateway
 
-var set_address_in_use = function(address, id, rawid) {
-  return new Promise(function(Success, R) {
-    client.set('address-' + address, id, function(err, reply) {
-      //   debugaddress(err, reply)
-      client.expireat('address-' + address, parseInt((+new Date) / 1000) + seconds_in_cache_15); // delete after 15 minutes
-    });
-    client.set('rawid-address-' + address, rawid, function(err, reply) {
-      //   debugaddress(err, reply)
-      client.expireat('address-' + address, parseInt((+new Date) / 1000) + seconds_in_cache_15); // delete after 15 minutes
-    });
-    client.set('address-expiration-' + address, parseInt((+new Date) / 1000) + seconds_in_cache_15, function(err, reply) {
-      //   debugaddress(err, reply)
-      client.expireat('address-' + address, parseInt((+new Date) / 1000) + seconds_in_cache_15); // delete after 15 minutes
-    });
-    client.set('id-' + id, address, function(err, reply) {
-      //   debugaddress(err, reply)
-      client.expireat('id-' + id, parseInt((+new Date) / 1000) + seconds_in_cache_10);
-      Success(reply)
-    });
+var setAddressInUse = async (address, id, rawid) => {
+  await Promise.all([
+    new Promise(resolve => client.set('address-' + address, id, (_, reply) => client.expireat('address-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, () => resolve()))),
+    new Promise(resolve => client.set('rawid-address-' + address, rawid, (_, reply) => client.expireat('address-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, () => resolve()))),
+    new Promise(resolve => client.set('address-expiration-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, (_, reply) => client.expireat('address-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, () => resolve()))),
+    new Promise(resolve => client.set('id-' + id, address, (_, reply) => client.expireat('id-' + id, parseInt((+new Date()) / 1000) + secondsInCache10, () => resolve())))
+  ])
+}
+var secondsLeftForAddress = address => {
+  return new Promise((resolve, reject) => client.get('address-expiration-' + address, (_, reply) => {
+    if (reply !== undefined) {
+      resolve(reply)
+    } else {
+      reject()
+    }
   })
+  )
 }
-var seconds_left_for_address = function(address) {
-  return new Promise(function(Success, Reject) {
-    client.get('address-expiration-' + address, function(err, reply) {
 
-      if (reply != undefined) {
-        Success(reply)
-      } else {
-        Reject();
-      }
-    });
+var idHasAddressAssigned = (id) => {
+  return new Promise(resolve => client.get('id-' + id, (_, reply) => {
+    resolve(reply)
+  }))
+}
+
+var idAssignedToAddress = (address) => {
+  return new Promise((resolve, reject) => client.get('rawid-address-' + address, (_, reply) => {
+    if (reply === null) {
+      reject()
+    } else {
+      resolve(reply)
+    }
   })
+  )
 }
 
-var id_has_address_assigned = function(id) {
-  return new Promise(function(Success, Reject) {
-    client.get('id-' + id, function(err, reply) {
-      if (reply === null) {
-        Reject();
-      } else {
-        Success(reply)
-      }
-    });
+var isAddressAvailable = (address, id, rawid) => {
+  return new Promise((resolve, reject) => client.get('address-' + address, (_, reply) => {
+    if (!reply) {
+      setAddressInUse(address, id, rawid).then(() => {
+        resolve(address)
+      })
+    } else {
+      reject(address)
+    }
   })
+  )
 }
 
-var id_assigned_to_address = function(address) {
-  return new Promise(function(Success, Reject) {
-    client.get('rawid-address-' + address, function(err, reply) {
-      if (reply === null) {
-        Reject();
-      } else {
-        Success(reply)
-      }
-    });
-  })
-}
+var generateKey = () => randomstring.generate({
+  length: 14,
+  charset: 'abcdefghijklmnpqrstuvwxyz1234567890'
+})
 
-var is_address_available = function(address, id, rawid) {
-  return new Promise(function(Success, Reject) {
-    client.get('address-' + address, function(err, reply) {
-      if (reply == undefined) {
-        set_address_in_use(address, id, rawid).then(function() {
-          Success(address)
-        })
-      } else {
-        Reject(address);
-      }
-    });
-  })
-}
-
-
-var generate_key = function() {
-  return randomstring.generate({
-    length: 14,
-    charset: 'abcdefghijklmnpqrstuvwxyz1234567890'
-  });
-}
-
-function Gateway(xpub, exchange_key) {
+function Gateway (xpub, exchangeKey) {
   var self = this
-  this.ies = {}
-  if (!(self instanceof Gateway)) return new Gateway(xpub, exchange_key)
-  this.xpub = xpub
-  this.unused_addresses = []
-  this.addresses_count = 0
-  this.events = new EventEmitter()
+  self.ies = {}
+  if (!(self instanceof Gateway)) return new Gateway(xpub, exchangeKey)
+  self.xpub = xpub
+  self.unused_addresses = []
+  self.addresses_count = 0
+  self.events = new EventEmitter()
 
-  this.retrieved = new HDPublicKey(this.xpub)
-  var bitcoin = new BLT()
+  self.retrieved = new HDPublicKey(self.xpub)
+  var bitcoin = BLT()
 
-  this.uBTCtoSAT = function(amount) {
+  self.uBTCtoSAT = (amount) => {
     return amount * 100
   }
 
-  this.SATtouBTC = function(amount) {
+  self.SATtouBTC = (amount) => {
     return amount / 100
   }
 
-  this.received_payment = function(payment, xpubinfo, initializedCallback) {
+  self.receivedPayment = async (payment, xpubinfo, initializedCallback) => {
     // self.forgetAddress(payment.address, xpubinfo, initializedCallback)
-    id_assigned_to_address(payment.address).then(function(id) {
+    try {
+      const id = await idAssignedToAddress(payment.address)
       payment.id = id
       self.events.emit('payment', payment)
       self.events.emit(payment.address, payment)
       self.forgetAddress(payment.address, xpubinfo, initializedCallback)
-    }, function() {
+    } catch (e) {
       self.events.emit('payment', payment)
       self.events.emit(payment.address, payment)
       self.forgetAddress(payment.address, xpubinfo, initializedCallback)
-    })
+    }
   }
 
-  this.forgetAddress = function(address, xpubinfo, initializedCallback) {
+  self.forgetAddress = async (address, xpubinfo, initializedCallback) => {
     // debugaddress('ADDRESS USED:', address.toString())
-    client.lrem('available-addresses' + xpubinfo._id, 0, address.toString());
-    client.sadd('used-addresses' + xpubinfo._id, address.toString());
-    client.get('address-' + address, function(err, reply) {
-      if (reply != null) {
-        client.del('id-' + reply)
-      }
-    });
-    self.checkAddress(xpubinfo, self.ies[xpubinfo._id], initializedCallback)
+    await Promise.all([
+      new Promise(resolve => client.lrem('available-addresses' + xpubinfo._id, 0, address.toString(), () => resolve())),
+      new Promise(resolve => client.sadd('used-addresses' + xpubinfo._id, address.toString(), () => resolve())),
+      new Promise(resolve => client.get('address-' + address, (_, reply) => {
+        if (reply != null) {
+          client.del('id-' + reply)
+        }
+        resolve()
+      }))
+    ])
+    await self.checkAddress(xpubinfo, self.ies[xpubinfo._id], initializedCallback)
     self.ies[xpubinfo._id] = self.ies[xpubinfo._id] + 1
   }
   var initialized = {}
-  var address_count = {}
-  this.checkAddress = function(xpubinfo, i, initializedCallback) {
+  var addressCount = {}
+  self.checkAddress = async (xpubinfo, i, initializedCallback) => {
     // console.log('xpubinfo', xpubinfo)
     var retrieved = new HDPublicKey(xpubinfo.xpub)
-    var derived = retrieved.derive(0).derive(i);
-    var address = new Address(derived.publicKey, Networks.livenet);
+    var derived = retrieved.derive(0).derive(i)
+    var address = new Address(derived.publicKey, Networks.livenet)
 
-    client.lrem('available-addresses' + xpubinfo._id, 0, address.toString());
-    client.rpush('available-addresses' + xpubinfo._id, address.toString());
+    client.lrem('available-addresses' + xpubinfo._id, 0, address.toString())
+    client.rpush('available-addresses' + xpubinfo._id, address.toString())
     // debugaddress('<checkAddress>', i, address)
 
-    client.sismember('used-addresses' + xpubinfo._id, address.toString(), function(err, res) {
-      if (res != 0) {
-
-        self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
+    await new Promise(resolve => client.sismember('used-addresses' + xpubinfo._id, address.toString(), async (_, res) => {
+      if (res !== 0) {
+        await self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
       } else {
-        bitcoin.getBalance(address.toString()).then(function(transaction) {
+        try {
+          const transaction = await bitcoin.getBalance(address.toString())
           if (transaction.txs > 0) {
-            client.get('address-' + address.toString(), function(err, reply) {
+            await new Promise(resolve => client.get('address-' + address.toString(), async (_, reply) => {
               if (reply != null) {
-                self.received_payment({ address: address.toString(), amount: self.uBTCtoSAT(transaction.in) }, xpubinfo, initializedCallback)
+                await self.receivedPayment({ address: address.toString(), amount: self.uBTCtoSAT(transaction.in) }, xpubinfo, initializedCallback)
               } else {
-                self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
+                await self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
               }
-            })
+              resolve()
+            }))
           } else {
-            debugbrp('Monitoring address:', address.toString())
-            if (address_count[xpubinfo._id] == undefined) {
-              address_count[xpubinfo._id] = 0
-            }
-            address_count[xpubinfo._id] = address_count[xpubinfo._id] + 1
-            console.log('address_count', address_count)
-            bitcoin.events.on(address.toString(), function(payment) {
-              self.received_payment(payment, xpubinfo, initializedCallback)
-            })
-            if (address_count[xpubinfo._id] > 4 && initialized[xpubinfo._id] != true) {
-              initialized[xpubinfo._id] = true
-              initializedCallback()
-              // self.events.emit('initialized')
-            }
+            throw new Error('No Transactions')
           }
-        })
+        } catch (e) {
+          debugbrp('Monitoring address:', address.toString())
+          if (addressCount[xpubinfo._id] === undefined) {
+            addressCount[xpubinfo._id] = 0
+          }
+          addressCount[xpubinfo._id] = addressCount[xpubinfo._id] + 1
+          console.log('address_count', addressCount)
+          bitcoin.events.on(address.toString(), function (payment) {
+            self.receivedPayment(payment, xpubinfo, initializedCallback)
+          })
+          if (addressCount[xpubinfo._id] > 4 && initialized[xpubinfo._id] !== true) {
+            initialized[xpubinfo._id] = true
+            initializedCallback()
+            // self.events.emit('initialized')
+          }
+        }
       }
-    })
+      resolve()
+    }))
   }
 
+  self.lastrandom = 0
+  self.newrandom = 0
 
-  this.lastrandom = 0
-  this.newrandom = 0
-
-  this.check_gap = function(xpubinfo, callback) {
+  self.check_gap = async (xpubinfo, callback) => {
     debugaddress('<check_gap>', xpubinfo)
-    if (this.ies[xpubinfo._id] == undefined) {
-      this.ies[xpubinfo._id] = 0
+    if (self.ies[xpubinfo._id] === undefined) {
+      self.ies[xpubinfo._id] = 0
     }
-    var a = this.ies[xpubinfo._id]
-    if (a < max_gap) {
-      for (var a = 0; a < max_gap; a++) {
-        this.checkAddress(xpubinfo, a, callback)
+    let a = self.ies[xpubinfo._id]
+    if (a < maxGap) {
+      for (a = 0; a < maxGap; a++) {
+        await self.checkAddress(xpubinfo, a, callback)
       }
       // xpubinfo.i = a;
-      this.ies[xpubinfo._id] = a
+      self.ies[xpubinfo._id] = a
     } else {
       callback()
     }
   }
 
-  this.creatingAddress = false
+  self.creatingAddress = false
 
-  self.getOneAvailable = function(id, rawid, addresses, a, Success, Reject) {
+  self.getOneAvailable = async (id, rawid, addresses, a) => {
     debugaddress('<getOneAvailable>', id)
-    is_address_available(addresses[a], id, rawid).then(function(address) {
-      Success(address)
-    }, function() {
-      debugaddress('a:', a, 'max_gap', max_gap)
-      if (a < (max_gap - 1)) {
+    try {
+      return await isAddressAvailable(addresses[a], id, rawid)
+    } catch (e) {
+      debugaddress('a:', a, 'max_gap', maxGap)
+      if (a < (maxGap - 1)) {
         debugaddress('getOneAvailable')
-        self.getOneAvailable(id, rawid, addresses, a + 1, Success, Reject)
+        return await self.getOneAvailable(id, rawid, addresses, a + 1)
       } else {
-        debugaddress('Reject')
-        Reject()
+        debugaddress('reject')
+        throw e
       }
-    })
+    }
   }
 
   var creatingAddresses = {}
-  self.createAddress = function(id) {
-    console.log('<createAddress>', this.xpub, id)
-    return new Promise(function(Succ, Reject) {
-      client.get(this.xpub, function(err, xpubid) {
+  self.createAddress = (id) => {
+    console.log('<createAddress>', self.xpub, id)
+    return new Promise((resolve, reject) => {
+      client.get(self.xpub, (_, xpubid) => {
         if (xpubid == null) {
-          xpubid = generate_key()
-          client.set(this.xpub, xpubid, function(err, reply) {
-            console.log('set new key', xpubid, 'for xpub:', this.xpub)
+          xpubid = generateKey()
+          client.set(self.xpub, xpubid, (_, reply) => {
+            console.log('set new key', xpubid, 'for xpub:', self.xpub)
           })
         }
         console.log('got key', xpubid)
 
-        var Success = function(address) {
+        var success = async (address) => {
           creatingAddresses[xpubinfo._id] = false
-          seconds_left_for_address(address).then(function(seconds_left) {
-            Succ({ address: address, seconds_left: (parseInt(seconds_left) - parseInt(+new Date) / 1000) })
-          })
+          const secondsLeft = await secondsLeftForAddress(address)
+          resolve({ address: address, seconds_left: (parseInt(secondsLeft) - parseInt(+new Date()) / 1000) })
         }
 
-        var process_create_request = function() {
-          id_has_address_assigned(id + xpubinfo._id).then(Success, function() {
-            client.lrange('available-addresses' + xpubinfo._id, 0, -1, function(err, addresses) {
+        var processCreateRequest = async () => {
+          const assignedAddress = await idHasAddressAssigned(id + xpubinfo._id)
+          if (assignedAddress) {
+            success(assignedAddress)
+          } else {
+            client.lrange('available-addresses' + xpubinfo._id, 0, -1, async (_, addresses) => {
               if (creatingAddresses[xpubinfo._id] !== true) {
                 creatingAddresses[xpubinfo._id] = true
-                self.getOneAvailable(id + xpubinfo._id, id, addresses, 0, Success, Reject)
+                try {
+                  const address = await self.getOneAvailable(id + xpubinfo._id, id, addresses, 0)
+                  success(address)
+                } catch (e) {
+                  reject(e)
+                }
               } else {
                 self.newrandom = 100 + 500 * Math.random()
                 while (self.lastrandom === self.newrandom) {
                   self.newrandom = 100 + 1000 * Math.random()
                 }
-                setTimeout(function() {
-                  self.getOneAvailable(id + xpubinfo._id, id, addresses, 0, Success, Reject)
+                setTimeout(async () => {
+                  try {
+                    const address = await self.getOneAvailable(id + xpubinfo._id, id, addresses, 0)
+                    success(address)
+                  } catch (e) {
+                    reject(e)
+                  }
                 }, self.newrandom)
                 self.lastrandom = self.newrandom
               }
             })
-          })
+          }
         }
 
         var xpubinfo = { _id: xpubid, xpub: self.xpub }
-        if (self.ies[xpubinfo._id] == undefined) {
-          self.check_gap(xpubinfo, process_create_request)
+        if (self.ies[xpubinfo._id] === undefined) {
+          self.check_gap(xpubinfo, processCreateRequest)
         } else {
-          process_create_request()
+          processCreateRequest()
         }
       })
     })
   }
 
-  self.connect = function() {
-    bitcoin.events.on('connected', function() {
+  self.connect = () => {
+    bitcoin.events.on('connected', () => {
       // self.check_gap()
     })
     bitcoin.connect()
   }
 
-
-  return this
+  return self
 }
