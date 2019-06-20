@@ -1,74 +1,104 @@
+const fs = require('fs')
+const moment = require('moment-timezone')
 var EventEmitter = require('events').EventEmitter
 var BLT = require('../bitcoin-live-transactions')
-var bitcore = require('bitcore-lib')
-var HDPublicKey = bitcore.HDPublicKey
-var Address = bitcore.Address
-var Networks = bitcore.Networks
+const Bitcoin = require('bitcoinjs-lib')
 var secondsInCache15 = 60 * 15
 var secondsInCache14 = 60 * 14
 var secondsInCache10 = 60 * 10
 var secondsInCache5 = 60 * 5
-var redis = require('redis')
-var client = redis.createClient()
+// var redis = require('redis')
+// var client = redis.createClient()
 var maxGap = 15
 var debugbrp = require('debug')('brp')
 var debugaddress = require('debug')('brp:address')
 var randomstring = require('randomstring')
 
-// var env = process.env.NODE_ENV || 'development';
-// var config = require('./config')[env];
-// require('./config/mongoose')(config);
-// client.flushdb()
-
 module.exports = Gateway
 
-var setAddressInUse = async (address, id, rawid) => {
-  await Promise.all([
-    new Promise(resolve => client.set('address-' + address, id, (_, reply) => client.expireat('address-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, () => resolve()))),
-    new Promise(resolve => client.set('rawid-address-' + address, rawid, (_, reply) => client.expireat('address-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, () => resolve()))),
-    new Promise(resolve => client.set('address-expiration-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, (_, reply) => client.expireat('address-' + address, parseInt((+new Date()) / 1000) + secondsInCache15, () => resolve()))),
-    new Promise(resolve => client.set('id-' + id, address, (_, reply) => client.expireat('id-' + id, parseInt((+new Date()) / 1000) + secondsInCache10, () => resolve())))
-  ])
-}
-var secondsLeftForAddress = address => {
-  return new Promise((resolve, reject) => client.get('address-expiration-' + address, (_, reply) => {
-    if (reply !== undefined) {
-      resolve(reply)
-    } else {
-      reject()
+let storeData = null
+const store = {
+  init: () => {
+    try {
+      storeData = JSON.parse(fs.readFileSync('../payments.json'))
+    } catch (e) {
+      storeData = {
+        expiry: {}
+      }
     }
-  })
-  )
+  },
+  get: field => {
+    const data = storeData[field]
+    const dataExpiry = storeData.expiry[field]
+    if(!dataExpiry || moment.utc(dataExpiry) > moment.utc()) {
+      return data || null
+    } else {
+      delete storeData[field]
+      delete storeData.expiry[field]
+      return null
+    }
+  },
+  set: (field, data, expiry) => {
+    storeData[field] = data
+    if (expiry) {
+      storeData.expiry[field] = moment.utc(expiry).toISOString()
+    }
+    fs.writeFileSync('../payments.json', JSON.stringify(storeData, null, 2))
+  },
+  remove: (field, data) => {
+    if (!data) {
+      delete storeData[field]
+      delete storeData.expiry[field]
+    } else {
+      let array = storeData[field] || []
+      array = array.filter(i => i !== data)
+      storeData[field] = array
+      fs.writeFileSync('../payments.json', JSON.stringify(storeData, null, 2))  
+    }
+  },
+  add: (field, value) => {
+    const array = storeData[field] || []
+    array.push(value)
+    storeData[field] = array
+    fs.writeFileSync('../payments.json', JSON.stringify(storeData, null, 2))
+  },
+  exists: (field, value) => {
+    const array = storeData[field] || []
+    return array.includes(value)
+  },
+}
+
+var setAddressInUse = (address, id, rawid) => {
+  store.set(`address-${address}`, id, moment.utc().add(secondsInCache15, 'seconds'))
+  store.set(`rawid-address-${address}`, rawid, moment.utc().add(secondsInCache15, 'seconds'))
+  store.set(`rawidaddress-expiration-${address}`, moment.utc().add(secondsInCache15, 'seconds').toISOString(), moment.utc().add(secondsInCache15, 'seconds'))
+  store.set(`id-${id}`, address, moment.utc().add(secondsInCache10, 'seconds'))
+}
+
+var secondsLeftForAddress = address => {
+  const addressExpiry = store.get(`rawidaddress-expiration-${address}`)
+  if (addressExpiry) {
+    const endDate = moment(addressExpiry)
+    return endDate.diff(moment(), 'seconds')
+  }
+  return null
 }
 
 var idHasAddressAssigned = (id) => {
-  return new Promise(resolve => client.get('id-' + id, (_, reply) => {
-    resolve(reply)
-  }))
+  return store.get(`id-${id}`)
 }
 
 var idAssignedToAddress = (address) => {
-  return new Promise((resolve, reject) => client.get('rawid-address-' + address, (_, reply) => {
-    if (reply === null) {
-      reject()
-    } else {
-      resolve(reply)
-    }
-  })
-  )
+  return store.get(`rawid-address-${address}`)
 }
 
 var isAddressAvailable = (address, id, rawid) => {
-  return new Promise((resolve, reject) => client.get('address-' + address, (_, reply) => {
-    if (!reply) {
-      setAddressInUse(address, id, rawid).then(() => {
-        resolve(address)
-      })
-    } else {
-      reject(address)
-    }
-  })
-  )
+  const reply = store.get(`address-${address}`)
+  if (!reply) {
+    setAddressInUse(address, id, rawid)
+    return true
+  }
+  return false
 }
 
 var generateKey = () => randomstring.generate({
@@ -85,8 +115,12 @@ function Gateway (xpub, exchangeKey) {
   self.addresses_count = 0
   self.events = new EventEmitter()
 
-  self.retrieved = new HDPublicKey(self.xpub)
-  var bitcoin = BLT()
+  try {
+    self.baseWallet = Bitcoin.bip32.fromBase58(xpub).neutered()
+  } catch(e) {
+    console.log(e)
+  }
+  var bitcoin = BLT({ testnet: false })
 
   self.uBTCtoSAT = (amount) => {
     return amount * 100
@@ -98,13 +132,13 @@ function Gateway (xpub, exchangeKey) {
 
   self.receivedPayment = async (payment, xpubinfo, initializedCallback) => {
     // self.forgetAddress(payment.address, xpubinfo, initializedCallback)
-    try {
-      const id = await idAssignedToAddress(payment.address)
+    const id = idAssignedToAddress(payment.address)
+    if (id) {
       payment.id = id
       self.events.emit('payment', payment)
       self.events.emit(payment.address, payment)
       self.forgetAddress(payment.address, xpubinfo, initializedCallback)
-    } catch (e) {
+    } else {
       self.events.emit('payment', payment)
       self.events.emit(payment.address, payment)
       self.forgetAddress(payment.address, xpubinfo, initializedCallback)
@@ -113,68 +147,61 @@ function Gateway (xpub, exchangeKey) {
 
   self.forgetAddress = async (address, xpubinfo, initializedCallback) => {
     // debugaddress('ADDRESS USED:', address.toString())
-    await Promise.all([
-      new Promise(resolve => client.lrem('available-addresses' + xpubinfo._id, 0, address.toString(), () => resolve())),
-      new Promise(resolve => client.sadd('used-addresses' + xpubinfo._id, address.toString(), () => resolve())),
-      new Promise(resolve => client.get('address-' + address, (_, reply) => {
-        if (reply != null) {
-          client.del('id-' + reply)
-        }
-        resolve()
-      }))
-    ])
+    store.remove(`available-addresses-${xpubinfo._id}`, address.toString())
+    store.add(`used-addresses-${xpubinfo._id}`, address.toString())
+    const id = store.get(`address-${address}`)
+    if (id != null) {
+      store.remove(`id-${id}`)
+    }
     await self.checkAddress(xpubinfo, self.ies[xpubinfo._id], initializedCallback)
     self.ies[xpubinfo._id] = self.ies[xpubinfo._id] + 1
   }
+
   var initialized = {}
   var addressCount = {}
   self.checkAddress = async (xpubinfo, i, initializedCallback) => {
     // console.log('xpubinfo', xpubinfo)
-    var retrieved = new HDPublicKey(xpubinfo.xpub)
-    var derived = retrieved.derive(0).derive(i)
-    var address = new Address(derived.publicKey, Networks.livenet)
-
-    client.lrem('available-addresses' + xpubinfo._id, 0, address.toString())
-    client.rpush('available-addresses' + xpubinfo._id, address.toString())
+    var baseWallet = self.baseWallet
+    var derived = baseWallet.derive(0).derive(i)
+    
+    const { address } = Bitcoin.payments.p2sh({
+      redeem: Bitcoin.payments.p2wpkh({ pubkey: derived.publicKey })
+    })
+    
+    console.log(address)    
+    store.remove(`available-addresses-${xpubinfo._id}`, address.toString())
+    store.add(`available-addresses-${xpubinfo._id}`, address.toString())
     // debugaddress('<checkAddress>', i, address)
 
-    await new Promise(resolve => client.sismember('used-addresses' + xpubinfo._id, address.toString(), async (_, res) => {
-      if (res !== 0) {
-        await self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
+    const isUsed = store.exists(`used-addresses-${xpubinfo._id}`, address.toString())
+    if (isUsed) {
+        self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
+    } else {
+      const transaction = await bitcoin.getBalance(address.toString())
+      if (transaction.txs > 0) {
+        const address = store.get('address-' + address.toString())
+        if (address != null) {
+          self.receivedPayment({ address: address.toString(), amount: self.uBTCtoSAT(transaction.in) }, xpubinfo, initializedCallback)
+        } else {
+          self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
+        }
       } else {
-        try {
-          const transaction = await bitcoin.getBalance(address.toString())
-          if (transaction.txs > 0) {
-            await new Promise(resolve => client.get('address-' + address.toString(), async (_, reply) => {
-              if (reply != null) {
-                await self.receivedPayment({ address: address.toString(), amount: self.uBTCtoSAT(transaction.in) }, xpubinfo, initializedCallback)
-              } else {
-                await self.forgetAddress(address.toString(), xpubinfo, initializedCallback)
-              }
-              resolve()
-            }))
-          } else {
-            throw new Error('No Transactions')
-          }
-        } catch (e) {
-          debugbrp('Monitoring address:', address.toString())
-          if (addressCount[xpubinfo._id] === undefined) {
-            addressCount[xpubinfo._id] = 0
-          }
-          addressCount[xpubinfo._id] = addressCount[xpubinfo._id] + 1
-          console.log('address_count', addressCount)
-          bitcoin.events.on(address.toString(), function (payment) {
-            self.receivedPayment(payment, xpubinfo, initializedCallback)
-          })
-          if (addressCount[xpubinfo._id] > 4 && initialized[xpubinfo._id] !== true) {
-            initialized[xpubinfo._id] = true
-            initializedCallback()
-            // self.events.emit('initialized')
-          }
+        debugbrp('Monitoring address:', address.toString())
+        if (addressCount[xpubinfo._id] === undefined) {
+          addressCount[xpubinfo._id] = 0
+        }
+        addressCount[xpubinfo._id] = addressCount[xpubinfo._id] + 1
+        console.log('address_count', addressCount)
+        bitcoin.events.on(address.toString(), (payment) => {
+          self.receivedPayment(payment, xpubinfo, initializedCallback)
+        })
+        if (addressCount[xpubinfo._id] > 4 && initialized[xpubinfo._id] !== true) {
+          initialized[xpubinfo._id] = true
+          initializedCallback()
+          // self.events.emit('initialized')
         }
       }
-      resolve()
-    }))
+    }
   }
 
   self.lastrandom = 0
@@ -199,19 +226,13 @@ function Gateway (xpub, exchangeKey) {
 
   self.creatingAddress = false
 
-  self.getOneAvailable = async (id, rawid, addresses, a) => {
+  self.getOneAvailable = (id, rawid, addresses) => {
     debugaddress('<getOneAvailable>', id)
-    try {
-      return await isAddressAvailable(addresses[a], id, rawid)
-    } catch (e) {
-      debugaddress('a:', a, 'max_gap', maxGap)
-      if (a < (maxGap - 1)) {
-        debugaddress('getOneAvailable')
-        return await self.getOneAvailable(id, rawid, addresses, a + 1)
-      } else {
-        debugaddress('reject')
-        throw e
-      }
+    const address = addresses.find(a => isAddressAvailable(a, id, rawid))
+    if(!address) {
+      throw new Error('No avaliable addresses')
+    } else {
+      return address
     }
   }
 
@@ -219,67 +240,65 @@ function Gateway (xpub, exchangeKey) {
   self.createAddress = (id) => {
     console.log('<createAddress>', self.xpub, id)
     return new Promise((resolve, reject) => {
-      client.get(self.xpub, (_, xpubid) => {
-        if (xpubid == null) {
-          xpubid = generateKey()
-          client.set(self.xpub, xpubid, (_, reply) => {
-            console.log('set new key', xpubid, 'for xpub:', self.xpub)
-          })
-        }
-        console.log('got key', xpubid)
+      let xpubid = store.get(self.xpub)
+      if (xpubid === null) {
+        xpubid = generateKey()
+        store.set(self.xpub, xpubid)
+      }
+      console.log('got key', xpubid)
 
-        var success = async (address) => {
-          creatingAddresses[xpubinfo._id] = false
-          const secondsLeft = await secondsLeftForAddress(address)
-          resolve({ address: address, seconds_left: (parseInt(secondsLeft) - parseInt(+new Date()) / 1000) })
-        }
+      var success = async (address) => {
+        creatingAddresses[xpubinfo._id] = false
+        const secondsLeft = secondsLeftForAddress(address)
+        resolve({ address: address, seconds_left: secondsLeft })
+      }
 
-        var processCreateRequest = async () => {
-          const assignedAddress = await idHasAddressAssigned(id + xpubinfo._id)
-          if (assignedAddress) {
-            success(assignedAddress)
+      var processCreateRequest = async () => {
+        const assignedAddress = idHasAddressAssigned(id + xpubinfo._id)
+        if (assignedAddress) {
+          success(assignedAddress)
+        } else {
+          const addresses = store.get(`available-addresses-${xpubinfo._id}`)
+          if (creatingAddresses[xpubinfo._id] !== true) {
+            creatingAddresses[xpubinfo._id] = true
+            try {
+              const address = self.getOneAvailable(id + xpubinfo._id, id, addresses, 0)
+              success(address)
+            } catch (e) {
+              reject(e)
+            }
           } else {
-            client.lrange('available-addresses' + xpubinfo._id, 0, -1, async (_, addresses) => {
-              if (creatingAddresses[xpubinfo._id] !== true) {
-                creatingAddresses[xpubinfo._id] = true
-                try {
-                  const address = await self.getOneAvailable(id + xpubinfo._id, id, addresses, 0)
-                  success(address)
-                } catch (e) {
-                  reject(e)
-                }
-              } else {
-                self.newrandom = 100 + 500 * Math.random()
-                while (self.lastrandom === self.newrandom) {
-                  self.newrandom = 100 + 1000 * Math.random()
-                }
-                setTimeout(async () => {
-                  try {
-                    const address = await self.getOneAvailable(id + xpubinfo._id, id, addresses, 0)
-                    success(address)
-                  } catch (e) {
-                    reject(e)
-                  }
-                }, self.newrandom)
-                self.lastrandom = self.newrandom
+            self.newrandom = 100 + 500 * Math.random()
+            while (self.lastrandom === self.newrandom) {
+              self.newrandom = 100 + 1000 * Math.random()
+            }
+            setTimeout(async () => {
+              try {
+                const address = await self.getOneAvailable(id + xpubinfo._id, id, addresses, 0)
+                success(address)
+              } catch (e) {
+                reject(e)
               }
-            })
+            }, self.newrandom)
+            self.lastrandom = self.newrandom
           }
         }
+      }
 
-        var xpubinfo = { _id: xpubid, xpub: self.xpub }
-        if (self.ies[xpubinfo._id] === undefined) {
-          self.check_gap(xpubinfo, processCreateRequest)
-        } else {
-          processCreateRequest()
-        }
-      })
+      var xpubinfo = { _id: xpubid, xpub: self.xpub }
+      if (self.ies[xpubinfo._id] === undefined) {
+        self.check_gap(xpubinfo, processCreateRequest)
+      } else {
+        processCreateRequest()
+      }
     })
   }
 
   self.connect = () => {
     bitcoin.events.on('connected', () => {
       // self.check_gap()
+      store.init()
+      self.events.emit('initialized')
     })
     bitcoin.connect()
   }

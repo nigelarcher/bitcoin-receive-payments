@@ -1,9 +1,8 @@
 var BitcoinGateway = require('./index')
 
-var pub_key = 'xpub6CV... extended public key (xPub)'
-var openexchangerates_key = 'd1c95b7b... openexchangerates.org KEY'
+var pub_key = ''
 
-var gateway = new BitcoinGateway(pub_key, openexchangerates_key)
+var gateway = new BitcoinGateway(pub_key)
 
 var EXAMPLE_ID = '5554555'
 
@@ -14,7 +13,8 @@ gateway.events.on('initialized', function() {
       console.log('got new address', address.address, ' and it has', address.seconds_left / 60, 'minutes left.')
       var amount = 3.99
       console.log('will ask user ', amount, 'USD in it as', gateway.USDtoBIT(amount) + ' bits, using HTML, preferably as a QR code')
-    }).catch(function() {
+    }).catch(function(e) {
+      console.log(e)
       console.log('limit reached! cant get a new address :(')
     })
 })
